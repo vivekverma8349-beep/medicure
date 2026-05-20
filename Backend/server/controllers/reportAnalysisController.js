@@ -68,21 +68,21 @@ const MEDICAL_KEYWORDS = [
   "sugar", "pressure", "endocrinology", "department", "visit",
 ];
 
-// FIX: If text extraction returned empty/short text (e.g. scanned PDF, image),
+// FIX: If text extraction returned empty/short text (e.g. scanned PDF, handwritten image),
 // skip keyword validation and let Gemini decide — it can read the file visually.
 const isMedicalReport = (text) => {
-  text = String(text || "");
+  text = String(text || '');
 
-  // If text is too short, don't block — let Gemini handle it
-  if (text.trim().length < 30) return true;
+  // If text is short (OCR failed / handwritten), don't block — Gemini will analyze visually
+  if (text.trim().length < 100) return true;
 
   const lowerText = text.toLowerCase();
   const matchCount = MEDICAL_KEYWORDS.filter((kw) =>
     lowerText.includes(kw.toLowerCase())
   ).length;
 
-  // Require at least 2 medical keyword matches
-  return matchCount >= 2;
+  // Require at least 1 medical keyword match (was 2 — loosened for handwritten docs)
+  return matchCount >= 1;
 };
 
 // ANALYZE MEDICAL REPORT
@@ -202,26 +202,27 @@ const analyzeMedicalReport = async (req, res) => {
     // UPLOAD FILE (after duplicate check passes — only for new reports)
     const uploadedFile = await upload(file);
 
-    // Enhanced AI prompt
-    const prompt = `You are an advanced medical prescription reading assistant.
+    const prompt = `You are an expert medical document reader with advanced vision capabilities.
 
-Your task:
+You will receive:
+1. A medical document image (may be handwritten prescription, printed lab report, or scanned document)
+2. OCR extracted text (may be empty or garbled for handwritten documents — IGNORE if unclear)
 
-1. Analyze the uploaded medical report or handwritten prescription carefully.
-2. Use both OCR extracted text and visual understanding.
-3. Identify:
-   - diseases
-   - medicines
-   - medical tests
-   - doctor recommendations
-4. If handwriting is unclear:
-   - provide best possible interpretation
-   - mark uncertain words with '(unclear)'
-   - never hallucinate medicine names
-5. Return confidence level for each extracted item.
-6. If image is not a medical document, clearly respond: NOT_A_MEDICAL_REPORT
+Your primary task is to VISUALLY analyze the image directly.
+Do NOT rely solely on the OCR text — especially for handwritten prescriptions where doctor's handwriting may be unclear.
 
-Return ONLY valid raw JSON. Do NOT write markdown, explanation, notes, or extra text.
+Instructions:
+- READ the image carefully using visual analysis
+- For handwritten text: interpret to the best of your ability, mark uncertain words with (unclear)
+- Extract ALL medical information visible in the image
+- NEVER hallucinate medicine names or dosages — only extract what is actually visible
+- If unsure about a word, include your best guess with (unclear) suffix
+
+IMPORTANT: Only return NOT_A_MEDICAL_REPORT if the image is CLEARLY not a medical document
+(e.g. a selfie, a food photo, a landscape). Poor handwriting does NOT make it non-medical.
+Handwritten prescriptions ARE valid medical documents even if OCR text is empty or garbled.
+
+Return ONLY valid raw JSON. No markdown, no explanation, no extra text.
 
 CRITICAL RULES for arrays:
 - "diseasesMentioned" must be an array of PLAIN STRINGS only. Example: ["Type 2 Diabetes", "Hypertension"]
@@ -253,13 +254,22 @@ Return strictly this structure:
   "isHandwritten": false
 }
 
-OCR Extracted Text:
-${extractedText}
+OCR Extracted Text (may be empty or garbled for handwritten docs — use image for visual analysis):
+${extractedText || '(no OCR text — rely entirely on visual analysis of the image)'}
 
-Now analyze carefully.`;
+Now carefully analyze the image and return the JSON.`;
 
-    // GEMINI RESPONSE
-    const result = await gemini.generateContent(prompt);
+    // GEMINI CALL — Multimodal: send image + OCR text together
+    // This allows Gemini to VISUALLY read handwritten prescriptions
+    // regardless of how bad the OCR extraction was.
+    const imagePart = {
+      inlineData: {
+        data: file.buffer.toString('base64'),
+        mimeType: file.mimetype || 'image/jpeg',
+      },
+    };
+
+    const result = await gemini.generateContent([prompt, imagePart]);
     const response = result.response.text();
 
     // Check if Gemini flagged it as non-medical
