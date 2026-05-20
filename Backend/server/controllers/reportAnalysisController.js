@@ -297,39 +297,89 @@ Now analyze carefully.`;
       }
     }
 
-    // CREATE MEDICAL REPORT
-    const medicalReport = await MedicalReport.create({
-      user: user._id,
-      patientName: analysis.personalDetails.patientName,
-      doctorName: analysis.personalDetails.doctorName,
-      hospitalName: analysis.personalDetails.hospitalName,
-      department: analysis.personalDetails.department,
-      visitDate: analysis.personalDetails.dateOfVisit,
-      nextVisitDate: analysis.personalDetails.nextVisitDate,
-      reportParagraph: analysis.reportParagraph,
-      shortSummary: analysis.shortSummary,
-      extractedText,
-      reportFileUrl: uploadedFile.url,
-      reportFileName: uploadedFile.name,
-      diseases: diseaseIds,
-      medicines: medicineIds,
-      tests: testIds,
-      reportsIncluded: analysis.reportsIncluded,
-    });
+    // DUPLICATE REPORT CHECK — prevent saving the same report twice
+    // Use extractedText as the fingerprint (same file == same text)
+    const existingReport = extractedText.trim().length > 0
+      ? await MedicalReport.findOne({ user: user._id, extractedText })
+      : null;
 
-    // Link report to diseases/medicines/tests
-    await Disease.updateMany(
-      { _id: { $in: diseaseIds } },
-      { $addToSet: { reports: medicalReport._id } }
-    );
-    await Medicine.updateMany(
-      { _id: { $in: medicineIds } },
-      { $addToSet: { reports: medicalReport._id } }
-    );
-    await Test.updateMany(
-      { _id: { $in: testIds } },
-      { $addToSet: { reports: medicalReport._id } }
-    );
+    let medicalReport;
+
+    if (existingReport) {
+      // Report already exists — just make sure any new disease/medicine/test IDs are linked
+      medicalReport = existingReport;
+
+      // Merge any newly upserted IDs that aren't already on the report
+      const newDiseaseIds = diseaseIds.filter(
+        (id) => !existingReport.diseases.some((d) => d.toString() === id.toString())
+      );
+      const newMedicineIds = medicineIds.filter(
+        (id) => !existingReport.medicines.some((m) => m.toString() === id.toString())
+      );
+      const newTestIds = testIds.filter(
+        (id) => !existingReport.tests.some((t) => t.toString() === id.toString())
+      );
+
+      if (newDiseaseIds.length || newMedicineIds.length || newTestIds.length) {
+        await MedicalReport.findByIdAndUpdate(existingReport._id, {
+          $addToSet: {
+            diseases: { $each: newDiseaseIds },
+            medicines: { $each: newMedicineIds },
+            tests: { $each: newTestIds },
+          },
+        });
+      }
+
+      // Link the existing report to any newly created diseases/medicines/tests
+      await Disease.updateMany(
+        { _id: { $in: diseaseIds } },
+        { $addToSet: { reports: existingReport._id } }
+      );
+      await Medicine.updateMany(
+        { _id: { $in: medicineIds } },
+        { $addToSet: { reports: existingReport._id } }
+      );
+      await Test.updateMany(
+        { _id: { $in: testIds } },
+        { $addToSet: { reports: existingReport._id } }
+      );
+
+      console.log("Duplicate report detected — returning existing report:", existingReport._id);
+    } else {
+      // CREATE MEDICAL REPORT (first time this file is uploaded)
+      medicalReport = await MedicalReport.create({
+        user: user._id,
+        patientName: analysis.personalDetails.patientName,
+        doctorName: analysis.personalDetails.doctorName,
+        hospitalName: analysis.personalDetails.hospitalName,
+        department: analysis.personalDetails.department,
+        visitDate: analysis.personalDetails.dateOfVisit,
+        nextVisitDate: analysis.personalDetails.nextVisitDate,
+        reportParagraph: analysis.reportParagraph,
+        shortSummary: analysis.shortSummary,
+        extractedText,
+        reportFileUrl: uploadedFile.url,
+        reportFileName: uploadedFile.name,
+        diseases: diseaseIds,
+        medicines: medicineIds,
+        tests: testIds,
+        reportsIncluded: analysis.reportsIncluded,
+      });
+
+      // Link report to diseases/medicines/tests
+      await Disease.updateMany(
+        { _id: { $in: diseaseIds } },
+        { $addToSet: { reports: medicalReport._id } }
+      );
+      await Medicine.updateMany(
+        { _id: { $in: medicineIds } },
+        { $addToSet: { reports: medicalReport._id } }
+      );
+      await Test.updateMany(
+        { _id: { $in: testIds } },
+        { $addToSet: { reports: medicalReport._id } }
+      );
+    }
 
     // RESPONSE
     res.status(200).json({
