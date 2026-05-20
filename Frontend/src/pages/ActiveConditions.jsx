@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import MainLayout from '../layouts/MainLayout'
 import API from '../api/axios'
+import SourceReportsModal from '../components/SourceReportsModal'
 
 const statusStyle = {
   Active: 'badge-active',
@@ -58,9 +59,9 @@ const Toast = ({ message, type }) => (
 const ActiveConditions = () => {
   const [conditions, setConditions] = useState([])
   const [loading, setLoading] = useState(true)
-  // NEW FEATURE: State for delete modal and toast
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [toast, setToast] = useState(null)
+  const [selectedItem, setSelectedItem] = useState(null)   // for SourceReportsModal
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type })
@@ -109,6 +110,15 @@ const ActiveConditions = () => {
         />
       )}
 
+      {/* Source Reports Modal */}
+      {selectedItem && (
+        <SourceReportsModal
+          item={selectedItem}
+          type="Disease"
+          onClose={() => setSelectedItem(null)}
+        />
+      )}
+
       <div style={{ marginBottom: '24px' }}>
         <h1 style={{ fontFamily: 'Sora, sans-serif', fontSize: '22px', fontWeight: 700, color: '#0f172a' }}>
           Active Conditions
@@ -131,7 +141,9 @@ const ActiveConditions = () => {
           {conditions.map((c) => {
             const status = c.status || 'Active'
             return (
-              <div key={c._id} className="card" style={{ padding: '20px' }}>
+              <div key={c._id} className="card" style={{ padding: '20px', cursor: 'pointer' }}
+                onClick={() => setSelectedItem(c)}
+              >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <div style={{
@@ -158,9 +170,20 @@ const ActiveConditions = () => {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <span className={statusStyle[status]}>{status}</span>
 
-                    {/* NEW FEATURE: Delete button */}
+                    {/* Reports linked badge */}
+                    {c.reports?.length > 0 && (
+                      <span style={{
+                        background: '#eff6ff', color: '#2563eb',
+                        padding: '3px 9px', borderRadius: '999px',
+                        fontSize: '11px', fontWeight: 700
+                      }}>
+                        {c.reports.length} report{c.reports.length !== 1 ? 's' : ''}
+                      </span>
+                    )}
+
+                    {/* Delete button — stop propagation so it doesn't open modal */}
                     <button
-                      onClick={() => setDeleteTarget(c)}
+                      onClick={(e) => { e.stopPropagation(); setDeleteTarget(c) }}
                       title="Delete condition"
                       style={{
                         border: 'none', background: '#fef2f2', color: '#ef4444',

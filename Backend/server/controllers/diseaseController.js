@@ -8,9 +8,16 @@ const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 // GET ALL DISEASES
 export const getAllDiseases = async (req, res) => {
   try {
-    const diseases = await Disease.find({ user: req.user._id }).sort({
-      createdAt: -1,
-    });
+    const diseases = await Disease.find({ user: req.user._id })
+      .populate({
+        path: 'reports',
+        populate: [
+          { path: 'diseases' },
+          { path: 'medicines' },
+          { path: 'tests' },
+        ],
+      })
+      .sort({ createdAt: -1 });
 
     res.status(200).json({ success: true, diseases });
   } catch (error) {

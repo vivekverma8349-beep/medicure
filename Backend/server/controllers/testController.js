@@ -12,8 +12,12 @@ export const getAllTests = async (req, res) => {
   try {
     const tests = await Test.find({ user: req.user._id })
       .populate({
-        path: "reports",
-        populate: { path: "user" },
+        path: 'reports',
+        populate: [
+          { path: 'diseases' },
+          { path: 'medicines' },
+          { path: 'tests' },
+        ],
       })
       .sort({ createdAt: -1 });
 

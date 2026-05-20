@@ -12,14 +12,16 @@ export const getAllMedicines = async (req, res) => {
   try {
     const medicines = await Medicine.find({ user: req.user._id })
       .populate({
-        path: "reports",
-        populate: { path: "user" },
+        path: 'reports',
+        populate: [
+          { path: 'diseases' },
+          { path: 'medicines' },
+          { path: 'tests' },
+        ],
       })
       .sort({ createdAt: -1 });
 
-    res
-      .status(200)
-      .json({ success: true, count: medicines.length, medicines });
+    res.status(200).json({ success: true, count: medicines.length, medicines });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
