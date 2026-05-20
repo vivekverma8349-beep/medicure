@@ -19,8 +19,15 @@ const protect = async (req, res, next) => {
         process.env.JWT_SECRET
       )
 
-      req.user = await User.findById(decoded.id)
-        .select('-password')
+      req.user = await User.findById(decoded.id).select('-password')
+
+      // If user was deleted but token still valid
+      if (!req.user) {
+        return res.status(401).json({
+          success: false,
+          message: 'User not found. Please login again.'
+        })
+      }
 
       next()
 

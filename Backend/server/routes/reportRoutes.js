@@ -10,15 +10,7 @@ import {
 const router = express.Router();
 
 // GET LOGGED IN USER REPORTS
-router.get(
-  "/",
-  protect,
-  async (req, res, next) => {
-    req.params.userId = req.user._id;
-    next();
-  },
-  getUserReports
-);
+router.get("/", protect, getUserReports);
 
 // GET REPORTS BY USER ID
 router.get("/user/:userId", protect, getUserReports);

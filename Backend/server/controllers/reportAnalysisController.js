@@ -120,7 +120,86 @@ const analyzeMedicalReport = async (req, res) => {
       });
     }
 
-    // UPLOAD FILE (after validation passes)
+    // ─── EARLY DUPLICATE CHECK ────────────────────────────────────────────────
+    // Run BEFORE Gemini AI call and BEFORE ImageKit upload to save cost & time.
+    // Same file → same extractedText OR same originalname → return stored result.
+    let earlyDuplicate = null;
+
+    if (extractedText.trim().length > 0) {
+      earlyDuplicate = await MedicalReport.findOne({ user: user._id, extractedText })
+        .populate("diseases")
+        .populate("medicines")
+        .populate("tests");
+    }
+
+    if (!earlyDuplicate && file.originalname) {
+      earlyDuplicate = await MedicalReport.findOne({
+        user: user._id,
+        reportFileName: file.originalname,
+      })
+        .populate("diseases")
+        .populate("medicines")
+        .populate("tests");
+    }
+
+    if (earlyDuplicate) {
+      console.log("Early duplicate detected — skipping Gemini. Returning stored report:", earlyDuplicate._id);
+
+      // If the existing report is missing its file URL (saved before the imagekit fix),
+      // upload the file now and patch the DB so the button shows next time.
+      let fileUrl = earlyDuplicate.reportFileUrl || null;
+      let fileName = earlyDuplicate.reportFileName || null;
+
+      if (!fileUrl) {
+        try {
+          const uploadedFile = await upload(file);
+          fileUrl  = uploadedFile.url;
+          fileName = uploadedFile.name;
+          await MedicalReport.findByIdAndUpdate(earlyDuplicate._id, {
+            reportFileUrl:  fileUrl,
+            reportFileName: fileName,
+          });
+          console.log("Patched missing reportFileUrl on existing report:", fileUrl);
+        } catch (uploadErr) {
+          console.log("Could not upload file for URL patch:", uploadErr.message);
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        duplicate: true,
+        reportFileUrl: fileUrl,
+        handwritingInfo: {
+          isHandwritten: earlyDuplicate.isHandwritten || false,
+          confidence: earlyDuplicate.handwritingConfidence || "high",
+        },
+        sections: [
+          { type: "summary",   title: "Summary",           content: earlyDuplicate.shortSummary },
+          {
+            type: "patient", title: "Patient Details",
+            content: [
+              { label: "Patient Name", value: earlyDuplicate.patientName },
+              { label: "Age",          value: earlyDuplicate.age },
+              { label: "Gender",       value: earlyDuplicate.gender },
+              { label: "Doctor Name",  value: earlyDuplicate.doctorName },
+              { label: "Hospital",     value: earlyDuplicate.hospitalName },
+              { label: "Department",   value: earlyDuplicate.department },
+              { label: "Visit Date",   value: earlyDuplicate.visitDate },
+              { label: "Next Visit",   value: earlyDuplicate.nextVisitDate },
+            ],
+          },
+          { type: "analysis",         title: "Detailed Analysis",    content: earlyDuplicate.reportParagraph },
+          { type: "diseases",         title: "Diseases Detected",    content: earlyDuplicate.diseases.map((d) => d.name) },
+          { type: "medicines",        title: "Medicines Prescribed", content: earlyDuplicate.medicines.map((m) => m.name) },
+          { type: "tests",            title: "Tests Mentioned",      content: earlyDuplicate.tests.map((t) => t.name) },
+          { type: "reportsIncluded",  title: "Lab Results",          content: earlyDuplicate.reportsIncluded || [] },
+        ],
+      });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // UPLOAD FILE (after duplicate check passes — only for new reports)
     const uploadedFile = await upload(file);
 
     // Enhanced AI prompt
@@ -361,17 +440,26 @@ Now analyze carefully.`;
         // ---- NEW REPORT: create for the first time ----
         medicalReport = await MedicalReport.create({
           user: user._id,
-          patientName: analysis.personalDetails.patientName,
-          doctorName: analysis.personalDetails.doctorName,
+          // Personal details
+          patientName:  analysis.personalDetails.patientName,
+          age:          analysis.personalDetails.age,
+          gender:       analysis.personalDetails.gender,
+          doctorName:   analysis.personalDetails.doctorName,
           hospitalName: analysis.personalDetails.hospitalName,
-          department: analysis.personalDetails.department,
-          visitDate: analysis.personalDetails.dateOfVisit,
+          department:   analysis.personalDetails.department,
+          visitDate:    analysis.personalDetails.dateOfVisit,
           nextVisitDate: analysis.personalDetails.nextVisitDate,
+          // Report content
           reportParagraph: analysis.reportParagraph,
-          shortSummary: analysis.shortSummary,
+          shortSummary:    analysis.shortSummary,
           extractedText,
-          reportFileUrl: uploadedFile.url,
+          // File info
+          reportFileUrl:  uploadedFile.url,
           reportFileName: uploadedFile.name,
+          // Handwriting info
+          isHandwritten:         analysis.isHandwritten || false,
+          handwritingConfidence: analysis.handwritingConfidence || "high",
+          // Linked IDs
           diseases: diseaseIds,
           medicines: medicineIds,
           tests: testIds,
@@ -414,6 +502,7 @@ Now analyze carefully.`;
     // RESPONSE
     res.status(200).json({
       success: true,
+      reportFileUrl: medicalReport.reportFileUrl || null,
       handwritingInfo: {
         isHandwritten: analysis.isHandwritten || false,
         confidence: analysis.handwritingConfidence || "high",
@@ -428,11 +517,14 @@ Now analyze carefully.`;
           type: "patient",
           title: "Patient Details",
           content: [
-            { label: "Patient Name", value: analysis.personalDetails.patientName },
-            { label: "Doctor Name", value: analysis.personalDetails.doctorName },
-            { label: "Hospital", value: analysis.personalDetails.hospitalName },
-            { label: "Department", value: analysis.personalDetails.department },
-            { label: "Visit Date", value: analysis.personalDetails.dateOfVisit },
+            { label: "Patient Name",  value: analysis.personalDetails.patientName },
+            { label: "Age",           value: analysis.personalDetails.age },
+            { label: "Gender",        value: analysis.personalDetails.gender },
+            { label: "Doctor Name",   value: analysis.personalDetails.doctorName },
+            { label: "Hospital",      value: analysis.personalDetails.hospitalName },
+            { label: "Department",    value: analysis.personalDetails.department },
+            { label: "Visit Date",    value: analysis.personalDetails.dateOfVisit },
+            { label: "Next Visit",    value: analysis.personalDetails.nextVisitDate },
           ],
         },
         {
@@ -454,6 +546,11 @@ Now analyze carefully.`;
           type: "tests",
           title: "Tests Mentioned",
           content: analysis.testsMentioned,
+        },
+        {
+          type: "reportsIncluded",
+          title: "Lab Results",
+          content: analysis.reportsIncluded || [],
         },
       ],
     });
