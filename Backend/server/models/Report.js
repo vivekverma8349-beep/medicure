@@ -59,10 +59,25 @@ const medicalReportSchema = new mongoose.Schema(
   }
 );
 
-// FIX: Delete stale cached model to avoid schema mismatch on hot reload / nodemon restarts
-if (mongoose.models.MedicalReport) {
-  delete mongoose.models.MedicalReport;
-}
+// Unique index — same report (same user + same extracted text) must not be saved twice.
+// Mirrors the unique index pattern used in Disease, Medicine and Test models.
+medicalReportSchema.index(
+  { user: 1, extractedText: 1 },
+  {
+    unique: true,
+    sparse: true, // sparse = safe when extractedText is empty (scanned images)
+  }
+);
+
+// Unique index on fileName — fallback duplicate prevention for scanned images
+// where OCR returns empty text. sparse = safe when fileName is missing.
+medicalReportSchema.index(
+  { user: 1, reportFileName: 1 },
+  {
+    unique: true,
+    sparse: true,
+  }
+);
 
 const MedicalReport = mongoose.model("MedicalReport", medicalReportSchema);
 

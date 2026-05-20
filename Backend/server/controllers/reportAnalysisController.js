@@ -298,30 +298,35 @@ Now analyze carefully.`;
     }
 
     // DUPLICATE REPORT CHECK — prevent saving the same report twice
-    // Use extractedText as the fingerprint (same file == same text)
-    const existingReport = extractedText.trim().length > 0
-      ? await MedicalReport.findOne({ user: user._id, extractedText })
-      : null;
+    // Primary fingerprint: extractedText (same file text = same document)
+    // Fallback fingerprint: reportFileName (for scanned images where OCR returns nothing)
+    let existingReport = null;
 
-    let medicalReport;
+    if (extractedText.trim().length > 0) {
+      existingReport = await MedicalReport.findOne({ user: user._id, extractedText });
+    }
 
-    if (existingReport) {
-      // Report already exists — just make sure any new disease/medicine/test IDs are linked
-      medicalReport = existingReport;
+    if (!existingReport && uploadedFile.name) {
+      existingReport = await MedicalReport.findOne({
+        user: user._id,
+        reportFileName: uploadedFile.name,
+      });
+    }
 
-      // Merge any newly upserted IDs that aren't already on the report
+    // Helper to link IDs and merge onto an existing report
+    const linkToExisting = async (report) => {
       const newDiseaseIds = diseaseIds.filter(
-        (id) => !existingReport.diseases.some((d) => d.toString() === id.toString())
+        (id) => !report.diseases.some((d) => d.toString() === id.toString())
       );
       const newMedicineIds = medicineIds.filter(
-        (id) => !existingReport.medicines.some((m) => m.toString() === id.toString())
+        (id) => !report.medicines.some((m) => m.toString() === id.toString())
       );
       const newTestIds = testIds.filter(
-        (id) => !existingReport.tests.some((t) => t.toString() === id.toString())
+        (id) => !report.tests.some((t) => t.toString() === id.toString())
       );
 
       if (newDiseaseIds.length || newMedicineIds.length || newTestIds.length) {
-        await MedicalReport.findByIdAndUpdate(existingReport._id, {
+        await MedicalReport.findByIdAndUpdate(report._id, {
           $addToSet: {
             diseases: { $each: newDiseaseIds },
             medicines: { $each: newMedicineIds },
@@ -330,55 +335,80 @@ Now analyze carefully.`;
         });
       }
 
-      // Link the existing report to any newly created diseases/medicines/tests
       await Disease.updateMany(
         { _id: { $in: diseaseIds } },
-        { $addToSet: { reports: existingReport._id } }
+        { $addToSet: { reports: report._id } }
       );
       await Medicine.updateMany(
         { _id: { $in: medicineIds } },
-        { $addToSet: { reports: existingReport._id } }
+        { $addToSet: { reports: report._id } }
       );
       await Test.updateMany(
         { _id: { $in: testIds } },
-        { $addToSet: { reports: existingReport._id } }
+        { $addToSet: { reports: report._id } }
       );
+    };
 
+    let medicalReport;
+
+    if (existingReport) {
+      // ---- DUPLICATE: reuse the existing report ----
       console.log("Duplicate report detected — returning existing report:", existingReport._id);
+      await linkToExisting(existingReport);
+      medicalReport = existingReport;
     } else {
-      // CREATE MEDICAL REPORT (first time this file is uploaded)
-      medicalReport = await MedicalReport.create({
-        user: user._id,
-        patientName: analysis.personalDetails.patientName,
-        doctorName: analysis.personalDetails.doctorName,
-        hospitalName: analysis.personalDetails.hospitalName,
-        department: analysis.personalDetails.department,
-        visitDate: analysis.personalDetails.dateOfVisit,
-        nextVisitDate: analysis.personalDetails.nextVisitDate,
-        reportParagraph: analysis.reportParagraph,
-        shortSummary: analysis.shortSummary,
-        extractedText,
-        reportFileUrl: uploadedFile.url,
-        reportFileName: uploadedFile.name,
-        diseases: diseaseIds,
-        medicines: medicineIds,
-        tests: testIds,
-        reportsIncluded: analysis.reportsIncluded,
-      });
+      try {
+        // ---- NEW REPORT: create for the first time ----
+        medicalReport = await MedicalReport.create({
+          user: user._id,
+          patientName: analysis.personalDetails.patientName,
+          doctorName: analysis.personalDetails.doctorName,
+          hospitalName: analysis.personalDetails.hospitalName,
+          department: analysis.personalDetails.department,
+          visitDate: analysis.personalDetails.dateOfVisit,
+          nextVisitDate: analysis.personalDetails.nextVisitDate,
+          reportParagraph: analysis.reportParagraph,
+          shortSummary: analysis.shortSummary,
+          extractedText,
+          reportFileUrl: uploadedFile.url,
+          reportFileName: uploadedFile.name,
+          diseases: diseaseIds,
+          medicines: medicineIds,
+          tests: testIds,
+          reportsIncluded: analysis.reportsIncluded,
+        });
 
-      // Link report to diseases/medicines/tests
-      await Disease.updateMany(
-        { _id: { $in: diseaseIds } },
-        { $addToSet: { reports: medicalReport._id } }
-      );
-      await Medicine.updateMany(
-        { _id: { $in: medicineIds } },
-        { $addToSet: { reports: medicalReport._id } }
-      );
-      await Test.updateMany(
-        { _id: { $in: testIds } },
-        { $addToSet: { reports: medicalReport._id } }
-      );
+        // Link report to diseases/medicines/tests
+        await Disease.updateMany(
+          { _id: { $in: diseaseIds } },
+          { $addToSet: { reports: medicalReport._id } }
+        );
+        await Medicine.updateMany(
+          { _id: { $in: medicineIds } },
+          { $addToSet: { reports: medicalReport._id } }
+        );
+        await Test.updateMany(
+          { _id: { $in: testIds } },
+          { $addToSet: { reports: medicalReport._id } }
+        );
+      } catch (createErr) {
+        // DB-level unique index violation (error code 11000)
+        // This is a safety net in case the app-level check above was a race condition
+        if (createErr.code === 11000) {
+          console.log("DB unique index blocked duplicate report — fetching existing...");
+          medicalReport =
+            await MedicalReport.findOne({ user: user._id, extractedText }) ||
+            await MedicalReport.findOne({ user: user._id, reportFileName: uploadedFile.name });
+
+          if (medicalReport) {
+            await linkToExisting(medicalReport);
+          } else {
+            throw createErr; // Shouldn't happen, but re-throw if we truly can't find it
+          }
+        } else {
+          throw createErr;
+        }
+      }
     }
 
     // RESPONSE
