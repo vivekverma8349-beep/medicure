@@ -10,15 +10,51 @@ import MedicalReport from "../models/Report.js";
 import upload from "../services/imagekit.js";
 
 // CLEAN ARRAY FUNCTION
+// Handles both plain strings and objects Gemini occasionally returns
+const extractName = (item) => {
+  if (typeof item === "string") return item.trim();
+  if (item && typeof item === "object") {
+    // Try common key names Gemini uses for each field type
+    const val =
+      item.diseaseName ||
+      item.medicineName ||
+      item.testName ||
+      item.reportName ||
+      item.name ||
+      item.label ||
+      Object.values(item).find((v) => typeof v === "string" && v.trim());
+    return typeof val === "string" ? val.trim() : "";
+  }
+  return "";
+};
+
 const cleanArray = (arr = []) => {
   return arr
-    .filter((item) => typeof item === "string")
-    .map((item) => item.trim())
+    .map(extractName)
     .filter((item) => item !== "")
     .filter((item, index, self) => self.indexOf(item) === index);
 };
 
-// NEW FEATURE: Medical report validation keywords
+// Normalize reportsIncluded — Gemini sometimes returns objects with result/referenceRange
+const normalizeReportsIncluded = (arr = []) => {
+  return arr
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (item && typeof item === "object") {
+        const name = item.reportName || item.testName || item.name || "";
+        const result = item.result || "";
+        const ref = item.referenceRange || "";
+        const parts = [name, result && `Result: ${result}`, ref && `Ref: ${ref}`]
+          .filter(Boolean)
+          .join(" | ");
+        return parts.trim();
+      }
+      return "";
+    })
+    .filter((s) => s !== "");
+};
+
+// Medical report validation keywords
 const MEDICAL_KEYWORDS = [
   "hemoglobin", "patient", "prescription", "tablet", "blood",
   "mg/dl", "hospital", "lab", "test", "diagnosis", "doctor",
@@ -28,17 +64,19 @@ const MEDICAL_KEYWORDS = [
   "mri", "ct scan", "ultrasound", "ecg", "pathology",
   "pharmacy", "discharge", "admitted", "ward", "icu",
   "bp", "pulse", "temperature", "weight", "height",
+  "diabetes", "hypertension", "metformin", "hba1c", "fasting",
+  "sugar", "pressure", "endocrinology", "department", "visit",
 ];
 
-// NEW FEATURE: Check if extracted text looks like a medical document
+// FIX: If text extraction returned empty/short text (e.g. scanned PDF, image),
+// skip keyword validation and let Gemini decide — it can read the file visually.
 const isMedicalReport = (text) => {
-  // safely convert anything to string
   text = String(text || "");
 
-  if (text.trim().length < 30) return false;
+  // If text is too short, don't block — let Gemini handle it
+  if (text.trim().length < 30) return true;
 
   const lowerText = text.toLowerCase();
-
   const matchCount = MEDICAL_KEYWORDS.filter((kw) =>
     lowerText.includes(kw.toLowerCase())
   ).length;
@@ -66,9 +104,14 @@ const analyzeMedicalReport = async (req, res) => {
     }
 
     // EXTRACT TEXT
-    const extractedText = await extractText(file);
+    const rawExtracted = await extractText(file);
+    // Safely coerce to string — extractText may return non-string values on failure
+    const extractedText = typeof rawExtracted === "string" ? rawExtracted : String(rawExtracted ?? "");
 
-    // NEW FEATURE: Validate medical report before analysis
+    console.log("EXTRACTED TEXT LENGTH:", extractedText.length);
+    console.log("EXTRACTED TEXT PREVIEW:", extractedText.slice(0, 200));
+
+    // Validate medical report — now lenient when text extraction returns nothing
     if (!isMedicalReport(extractedText)) {
       return res.status(422).json({
         success: false,
@@ -80,7 +123,7 @@ const analyzeMedicalReport = async (req, res) => {
     // UPLOAD FILE (after validation passes)
     const uploadedFile = await upload(file);
 
-    // NEW FEATURE: Enhanced AI prompt supporting handwritten prescriptions (Feature 6)
+    // Enhanced AI prompt
     const prompt = `You are an advanced medical prescription reading assistant.
 
 Your task:
@@ -101,6 +144,13 @@ Your task:
 
 Return ONLY valid raw JSON. Do NOT write markdown, explanation, notes, or extra text.
 
+CRITICAL RULES for arrays:
+- "diseasesMentioned" must be an array of PLAIN STRINGS only. Example: ["Type 2 Diabetes", "Hypertension"]
+- "medicinesPrescribed" must be an array of PLAIN STRINGS only. Example: ["Metformin 500mg twice daily", "Vitamin D3 weekly"]
+- "testsMentioned" must be an array of PLAIN STRINGS only. Example: ["HbA1c", "Fasting Blood Sugar"]
+- "reportsIncluded" must be an array of PLAIN STRINGS only. Example: ["HbA1c: 8.2% (Ref: below 5.7%)", "Cholesterol: 224 mg/dL (Ref: below 200 mg/dL)"]
+- Do NOT put objects inside these arrays. Only plain strings.
+
 Return strictly this structure:
 
 {
@@ -115,10 +165,10 @@ Return strictly this structure:
     "nextVisitDate": ""
   },
   "reportParagraph": "",
-  "diseasesMentioned": [],
-  "medicinesPrescribed": [],
-  "testsMentioned": [],
-  "reportsIncluded": [],
+  "diseasesMentioned": ["plain string"],
+  "medicinesPrescribed": ["plain string"],
+  "testsMentioned": ["plain string"],
+  "reportsIncluded": ["plain string"],
   "shortSummary": "",
   "handwritingConfidence": "high|medium|low",
   "isHandwritten": false
@@ -133,7 +183,7 @@ Now analyze carefully.`;
     const result = await gemini.generateContent(prompt);
     const response = result.response.text();
 
-    // NEW FEATURE: Check if Gemini flagged it as non-medical
+    // Check if Gemini flagged it as non-medical
     if (response.includes("NOT_A_MEDICAL_REPORT")) {
       return res.status(422).json({
         success: false,
@@ -156,16 +206,17 @@ Now analyze carefully.`;
     try {
       analysis = JSON.parse(cleanedResponse);
     } catch (err) {
-      console.log("Invalid Gemini JSON");
+      console.log("Invalid Gemini JSON:", cleanedResponse);
       return res
         .status(500)
         .json({ success: false, message: "AI returned invalid JSON" });
     }
 
-    // CLEAN ARRAYS
+    // CLEAN ARRAYS — handles both plain strings and objects from Gemini
     analysis.diseasesMentioned = cleanArray(analysis.diseasesMentioned);
     analysis.medicinesPrescribed = cleanArray(analysis.medicinesPrescribed);
     analysis.testsMentioned = cleanArray(analysis.testsMentioned);
+    analysis.reportsIncluded = normalizeReportsIncluded(analysis.reportsIncluded);
 
     // UPDATE USER
     if (!user.name && analysis.personalDetails.patientName) {
@@ -182,68 +233,68 @@ Now analyze carefully.`;
     }
     await user.save();
 
-    // NEW FEATURE (Feature 2 & 3): Upsert diseases — no duplicates, use $addToSet for reports
+    // Upsert diseases
     const diseaseIds = [];
     for (const diseaseName of analysis.diseasesMentioned || []) {
-      if (
-        !diseaseName ||
-        typeof diseaseName !== "string" ||
-        diseaseName.trim() === ""
-      )
+      if (!diseaseName || typeof diseaseName !== "string" || diseaseName.trim() === "")
         continue;
-
       const normalizedName = diseaseName.trim().toLowerCase();
-
-      // findOneAndUpdate with upsert to prevent duplicate entry race conditions
-      const disease = await Disease.findOneAndUpdate(
-        { user: user._id, name: normalizedName },
-        { $setOnInsert: { user: user._id, name: normalizedName } },
-        { upsert: true, new: true }
-      );
-
-      diseaseIds.push(disease._id);
+      try {
+        const disease = await Disease.findOneAndUpdate(
+          { user: user._id, name: normalizedName },
+          { $setOnInsert: { user: user._id, name: normalizedName } },
+          { upsert: true, new: true }
+        );
+        diseaseIds.push(disease._id);
+      } catch (err) {
+        if (err.code === 11000) {
+          // Duplicate key — record already exists, just fetch it
+          const existing = await Disease.findOne({ user: user._id, name: normalizedName });
+          if (existing) diseaseIds.push(existing._id);
+        } else throw err;
+      }
     }
 
-    // NEW FEATURE (Feature 2 & 3): Upsert medicines
+    // Upsert medicines
     const medicineIds = [];
     for (const medicineName of analysis.medicinesPrescribed || []) {
-      if (
-        !medicineName ||
-        typeof medicineName !== "string" ||
-        medicineName.trim() === ""
-      )
+      if (!medicineName || typeof medicineName !== "string" || medicineName.trim() === "")
         continue;
-
       const normalizedName = medicineName.trim().toLowerCase();
-
-      const medicine = await Medicine.findOneAndUpdate(
-        { user: user._id, name: normalizedName },
-        { $setOnInsert: { user: user._id, name: normalizedName } },
-        { upsert: true, new: true }
-      );
-
-      medicineIds.push(medicine._id);
+      try {
+        const medicine = await Medicine.findOneAndUpdate(
+          { user: user._id, name: normalizedName },
+          { $setOnInsert: { user: user._id, name: normalizedName } },
+          { upsert: true, new: true }
+        );
+        medicineIds.push(medicine._id);
+      } catch (err) {
+        if (err.code === 11000) {
+          const existing = await Medicine.findOne({ user: user._id, name: normalizedName });
+          if (existing) medicineIds.push(existing._id);
+        } else throw err;
+      }
     }
 
-    // NEW FEATURE (Feature 2 & 3): Upsert tests
+    // Upsert tests
     const testIds = [];
     for (const testName of analysis.testsMentioned || []) {
-      if (
-        !testName ||
-        typeof testName !== "string" ||
-        testName.trim() === ""
-      )
+      if (!testName || typeof testName !== "string" || testName.trim() === "")
         continue;
-
       const normalizedName = testName.trim().toLowerCase();
-
-      const test = await Test.findOneAndUpdate(
-        { user: user._id, name: normalizedName },
-        { $setOnInsert: { user: user._id, name: normalizedName } },
-        { upsert: true, new: true }
-      );
-
-      testIds.push(test._id);
+      try {
+        const test = await Test.findOneAndUpdate(
+          { user: user._id, name: normalizedName },
+          { $setOnInsert: { user: user._id, name: normalizedName } },
+          { upsert: true, new: true }
+        );
+        testIds.push(test._id);
+      } catch (err) {
+        if (err.code === 11000) {
+          const existing = await Test.findOne({ user: user._id, name: normalizedName });
+          if (existing) testIds.push(existing._id);
+        } else throw err;
+      }
     }
 
     // CREATE MEDICAL REPORT
@@ -266,32 +317,27 @@ Now analyze carefully.`;
       reportsIncluded: analysis.reportsIncluded,
     });
 
-    // NEW FEATURE (Feature 3): Link report to diseases/medicines/tests using $addToSet (no duplicate refs)
+    // Link report to diseases/medicines/tests
     await Disease.updateMany(
       { _id: { $in: diseaseIds } },
       { $addToSet: { reports: medicalReport._id } }
     );
-
     await Medicine.updateMany(
       { _id: { $in: medicineIds } },
       { $addToSet: { reports: medicalReport._id } }
     );
-
     await Test.updateMany(
       { _id: { $in: testIds } },
       { $addToSet: { reports: medicalReport._id } }
     );
 
-    // RESPONSE — always show full analysis result to user
+    // RESPONSE
     res.status(200).json({
       success: true,
-
-      // NEW FEATURE: Include handwriting confidence info
       handwritingInfo: {
         isHandwritten: analysis.isHandwritten || false,
         confidence: analysis.handwritingConfidence || "high",
       },
-
       sections: [
         {
           type: "summary",
@@ -302,26 +348,11 @@ Now analyze carefully.`;
           type: "patient",
           title: "Patient Details",
           content: [
-            {
-              label: "Patient Name",
-              value: analysis.personalDetails.patientName,
-            },
-            {
-              label: "Doctor Name",
-              value: analysis.personalDetails.doctorName,
-            },
-            {
-              label: "Hospital",
-              value: analysis.personalDetails.hospitalName,
-            },
-            {
-              label: "Department",
-              value: analysis.personalDetails.department,
-            },
-            {
-              label: "Visit Date",
-              value: analysis.personalDetails.dateOfVisit,
-            },
+            { label: "Patient Name", value: analysis.personalDetails.patientName },
+            { label: "Doctor Name", value: analysis.personalDetails.doctorName },
+            { label: "Hospital", value: analysis.personalDetails.hospitalName },
+            { label: "Department", value: analysis.personalDetails.department },
+            { label: "Visit Date", value: analysis.personalDetails.dateOfVisit },
           ],
         },
         {
