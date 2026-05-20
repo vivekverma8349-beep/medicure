@@ -1,0 +1,178 @@
+import { useEffect, useState } from 'react'
+import MainLayout from '../layouts/MainLayout'
+import API from '../api/axios'
+
+const normalizeList = (data, key) => {
+  if (Array.isArray(data)) return data
+  if (Array.isArray(data?.[key])) return data[key]
+  return []
+}
+
+const resultColor = {
+  Normal: { bg: '#f0fdf4', color: '#16a34a' },
+  Abnormal: { bg: '#fef2f2', color: '#dc2626' }
+}
+
+// NEW FEATURE: Confirmation modal
+const ConfirmModal = ({ onConfirm, onCancel, name }) => (
+  <div style={{
+    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999
+  }}>
+    <div style={{
+      background: 'white', borderRadius: '16px', padding: '28px 32px',
+      maxWidth: '400px', width: '90%', boxShadow: '0 20px 60px rgba(0,0,0,0.15)'
+    }}>
+      <div style={{ fontSize: '24px', marginBottom: '12px' }}>🗑️</div>
+      <h3 style={{ fontFamily: 'Sora, sans-serif', fontSize: '16px', fontWeight: 700, color: '#0f172a', marginBottom: '8px' }}>
+        Delete Test
+      </h3>
+      <p style={{ fontSize: '14px', color: '#64748b', marginBottom: '24px' }}>
+        Are you sure you want to delete <strong>{name}</strong>? This action cannot be undone.
+      </p>
+      <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+        <button onClick={onCancel} style={{
+          padding: '8px 20px', border: '1px solid #e2e8f0', borderRadius: '8px',
+          background: 'white', color: '#374151', fontSize: '14px', cursor: 'pointer', fontWeight: 600
+        }}>Cancel</button>
+        <button onClick={onConfirm} style={{
+          padding: '8px 20px', border: 'none', borderRadius: '8px',
+          background: '#ef4444', color: 'white', fontSize: '14px', cursor: 'pointer', fontWeight: 600
+        }}>Delete</button>
+      </div>
+    </div>
+  </div>
+)
+
+// NEW FEATURE: Toast
+const Toast = ({ message, type }) => (
+  <div style={{
+    position: 'fixed', bottom: '24px', right: '24px', zIndex: 10000,
+    background: type === 'success' ? '#22c55e' : '#ef4444',
+    color: 'white', padding: '12px 20px', borderRadius: '10px',
+    fontSize: '14px', fontWeight: 600, boxShadow: '0 4px 20px rgba(0,0,0,0.15)'
+  }}>
+    {type === 'success' ? '✓' : '✗'} {message}
+  </div>
+)
+
+const Test = () => {
+  const [tests, setTests] = useState([])
+  // NEW FEATURE: Delete state
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [toast, setToast] = useState(null)
+
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type })
+    setTimeout(() => setToast(null), 3000)
+  }
+
+  useEffect(() => {
+    const fetchTests = async () => {
+      try {
+        const { data } = await API.get('/tests')
+        setTests(normalizeList(data, 'tests'))
+      } catch (error) {
+        console.log(error)
+      }
+    }
+    fetchTests()
+  }, [])
+
+  // NEW FEATURE: Delete handler
+  const handleDeleteConfirm = async () => {
+    try {
+      await API.delete(`/tests/${deleteTarget._id}`)
+      setTests(prev => prev.filter(t => t._id !== deleteTarget._id))
+      showToast('Test deleted successfully')
+    } catch (error) {
+      showToast(error?.response?.data?.message || 'Delete failed', 'error')
+    } finally {
+      setDeleteTarget(null)
+    }
+  }
+
+  return (
+    <MainLayout>
+      {toast && <Toast message={toast.message} type={toast.type} />}
+      {deleteTarget && (
+        <ConfirmModal
+          name={deleteTarget.name}
+          onConfirm={handleDeleteConfirm}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
+
+      <div style={{ marginBottom: '24px' }}>
+        <h1 style={{ fontFamily: 'Sora, sans-serif', fontSize: '22px', fontWeight: 700, color: '#0f172a' }}>Medical Tests</h1>
+        <p style={{ color: '#64748b', fontSize: '14px', marginTop: '4px' }}>Scheduled and completed lab tests</p>
+      </div>
+
+      <div className="card" style={{ overflow: 'hidden' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+              {['Test Name', 'Category', 'Lab', 'Result', 'Status', 'Date', ''].map(h => (
+                <th key={h} style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: 600, color: '#64748b', letterSpacing: '0.02em' }}>
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {tests.map((test, i) => (
+              <tr key={test._id || test.id || test.name}
+                style={{ borderBottom: i < tests.length - 1 ? '1px solid #f1f5f9' : 'none' }}
+                onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              >
+                <td style={{ padding: '14px 16px', fontSize: '14px', fontWeight: 600, color: '#0f172a' }}>{test.name}</td>
+                <td style={{ padding: '14px 16px', fontSize: '13px', color: '#64748b' }}>{test.category}</td>
+                <td style={{ padding: '14px 16px', fontSize: '13px', color: '#64748b' }}>{test.lab}</td>
+                <td style={{ padding: '14px 16px' }}>
+                  {test.result ? (
+                    <span style={{
+                      fontSize: '11px', fontWeight: 600, padding: '3px 10px', borderRadius: '100px',
+                      background: resultColor[test.result]?.bg || '#eff6ff',
+                      color: resultColor[test.result]?.color || '#2563eb'
+                    }}>{test.result}</span>
+                  ) : <span style={{ color: '#94a3b8', fontSize: '13px' }}>Pending</span>}
+                </td>
+                <td style={{ padding: '14px 16px' }}>
+                  <span className={test.status === 'Completed' ? 'badge-active' : 'badge-monitoring'}>
+                    {test.status || 'Pending'}
+                  </span>
+                </td>
+                <td style={{ padding: '14px 16px', fontSize: '13px', color: '#64748b' }}>
+                  {test.date || test.scheduledDate || test.createdAt
+                    ? new Date(test.date || test.scheduledDate || test.createdAt).toLocaleDateString()
+                    : '-'}
+                </td>
+                {/* NEW FEATURE: Delete button column */}
+                <td style={{ padding: '14px 16px' }}>
+                  <button
+                    onClick={() => setDeleteTarget(test)}
+                    title="Delete test"
+                    style={{
+                      border: 'none', background: '#fef2f2', color: '#ef4444',
+                      borderRadius: '8px', padding: '5px 8px', cursor: 'pointer'
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+                      <path d="M10 11v6M14 11v6" />
+                      <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
+                    </svg>
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </MainLayout>
+  )
+}
+
+export default Test
